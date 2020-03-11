@@ -263,7 +263,7 @@ export class UsersRouter extends ClassesRouter {
       if (!results.length || results.length < 1) {
         //throw new Parse.Error(Parse.Error.EMAIL_NOT_FOUND, `No user found with email ${email}`);
         return Promise.resolve({
-            response: {}
+          response: {}
         });
       }
       const user = results[0];
@@ -274,7 +274,7 @@ export class UsersRouter extends ClassesRouter {
       if (user.emailVerified) {
         //throw new Parse.Error(Parse.Error.OTHER_CAUSE, `Email ${email} is already verified.`);
         return Promise.resolve({
-            response: {}
+          response: {}
         });
       }
 
