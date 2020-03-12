@@ -561,8 +561,7 @@ RestQuery.prototype.handleInclude = function() {
   var pathResponse = includePath(this.config, this.auth,
     this.response, this.include[0], this.restOptions);
   if (pathResponse.then) {
-    return pathResponse.then((newResponse) => {
-      this.response = newResponse;
+    return pathResponse.then(() => {
       this.include = this.include.slice(1);
       return this.handleInclude();
     });
@@ -607,7 +606,7 @@ RestQuery.prototype.runAfterFindTrigger = function() {
 
 // Adds included values to the response.
 // Path is a list of field names.
-// Returns a promise for an augmented response.
+// Modifies the response in place by replacing pointers in the response with fetched objects
 function includePath(config, auth, response, path, restOptions = {}) {
   var pointers = findPointers(response.results, path);
   if (pointers.length == 0) {
@@ -682,85 +681,71 @@ function includePath(config, auth, response, path, restOptions = {}) {
       return replace;
     }, {})
 
-    var resp = {
-      results: replacePointers(response.results, path, replace)
-    };
-    if (response.count) {
-      resp.count = response.count;
-    }
-    return resp;
+    replacePointers(response.results, path, replace);
+    return response;
   });
+}
+
+
+// Given a tree of REST-format objects, where each node could actually be an
+// array of REST-format objects, and a path that is an array of attribute names
+// to follow, pass each node at that path into the given callback.
+//
+// @param objectOrArray The REST-format object tree
+// @param path An array of attribute names
+// @param callback A function that takes a single REST-format object
+function traverse(objectOrArray, path, callback) {
+  if (objectOrArray instanceof Array) {
+    return objectOrArray.forEach((node) => traverse(node, path, callback));
+  }
+  if (!objectOrArray || typeof objectOrArray !== 'object') {
+    return;
+  }
+
+  if (path.length === 0) {
+    callback(objectOrArray);
+    return;
+  }
+
+  const attr = path[0];
+  const node = objectOrArray[attr];
+  if (!node) { return; }
+  const remainingPath = path.slice(1);
+  traverse(node, remainingPath, callback);
 }
 
 // Object may be a list of REST-format object to find pointers in, or
 // it may be a single object.
-// If the path yields things that aren't pointers, this throws an error.
 // Path is a list of fields to search into.
 // Returns a list of pointers in REST format.
 function findPointers(object, path) {
-  if (object instanceof Array) {
-    var answer = [];
-    for (var x of object) {
-      answer = answer.concat(findPointers(x, path));
-    }
-    return answer;
-  }
-
-  if (typeof object !== 'object' || !object) {
-    return [];
-  }
-
-  if (path.length == 0) {
-    if (object === null || object.__type == 'Pointer') {
-      return [object];
-    }
-    return [];
-  }
-
-  var subobject = object[path[0]];
-  if (!subobject) {
-    return [];
-  }
-  return findPointers(subobject, path.slice(1));
+  const pointers = [];
+  traverse(object, path, (node) => {
+    if (node.__type === 'Pointer') { pointers.push(node); }
+  });
+  return pointers;
 }
 
 // Object may be a list of REST-format objects to replace pointers
 // in, or it may be a single object.
 // Path is a list of fields to search into.
 // replace is a map from object id -> object.
-// Returns something analogous to object, but with the appropriate
-// pointers inflated.
+//
+// Performs replacements in-place
 function replacePointers(object, path, replace) {
-  if (object instanceof Array) {
-    return object.map((obj) => replacePointers(obj, path, replace))
-      .filter((obj) => typeof obj !== 'undefined');
-  }
-
-  if (typeof object !== 'object' || !object) {
-    return object;
-  }
-
-  if (path.length === 0) {
-    if (object && object.__type === 'Pointer') {
-      return replace[object.objectId];
+  const searchPath = path.slice(0, -1);
+  const attrName = path[path.length - 1];
+  traverse(object, searchPath, (node) => {
+    const value = node[attrName];
+    if (value instanceof Array) {
+      // the value can be a mixed array; be careful to only replace pointers!
+      node[attrName] = value
+        .map(obj => obj && obj.__type === 'Pointer' ? replace[obj.objectId] : obj)
+        .filter(pointer => typeof pointer !== 'undefined');
+    } else if (value && value.__type === 'Pointer') {
+      node[attrName] = replace[value.objectId];
     }
-    return object;
-  }
-
-  var subobject = object[path[0]];
-  if (!subobject) {
-    return object;
-  }
-  var newsub = replacePointers(subobject, path.slice(1), replace);
-  var answer = {};
-  for (var key in object) {
-    if (key == path[0]) {
-      answer[key] = newsub;
-    } else {
-      answer[key] = object[key];
-    }
-  }
-  return answer;
+  });
 }
 
 // Finds a subobject that has the given key, if there is one.
