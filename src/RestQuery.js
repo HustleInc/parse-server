@@ -752,22 +752,20 @@ RestQuery.prototype.handleInclude = function() {
     return;
   }
 
-  var pathResponse = includePath(
-    this.config,
-    this.auth,
-    this.response,
-    this.include[0],
-    this.restOptions
-  );
-  if (pathResponse.then) {
-    return pathResponse.then(() => {
-      this.include = this.include.slice(1);
-      return this.handleInclude();
-    });
-  } else if (this.include.length > 0) {
-    this.include = this.include.slice(1);
-    return this.handleInclude();
-  }
+  // Construct a graph of promises, ensuring that we don't try to load
+  // any path until it's prefix has finished loading.
+  const promises = { '': Promise.resolve() };
+  this.include.forEach(path => {
+    const prefix = path.slice(0, -1).join('.');
+    const key = path.join('.');
+    const loadAfter = promises[prefix];
+    promises[key] = loadAfter.then(() =>
+      includePath(this.config, this.auth, this.response, path, this.restOptions)
+    );
+  });
+
+  // Wait for all includes to complete
+  return Promise.all(Object.values(promises));
 };
 
 //Returns a promise of a processed set of results
