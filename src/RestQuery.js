@@ -963,9 +963,9 @@ function replacePointers(object, path, replace) {
     // this could be either a pointer or an array of pointers
     const pointerOrPointers = node[attrName];
     if (pointerOrPointers instanceof Array) {
-      node[attrName] = pointerOrPointers.map(
-        pointer => pointer && replace[pointer.objectId]
-      );
+      node[attrName] = pointerOrPointers
+        .map(pointer => pointer && replace[pointer.objectId])
+        .filter(pointer => pointer || pointer === null);
     } else if (pointerOrPointers && pointerOrPointers.__type === 'Pointer') {
       node[attrName] = replace[pointerOrPointers.objectId];
     }
