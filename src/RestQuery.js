@@ -960,14 +960,14 @@ function replacePointers(object, path, replace) {
   const searchPath = path.slice(0, -1);
   const attrName = path[path.length - 1];
   traverse(object, searchPath, node => {
-    // this could be either a pointer or an array of pointers
-    const pointerOrPointers = node[attrName];
-    if (pointerOrPointers instanceof Array) {
-      node[attrName] = pointerOrPointers
-        .map(pointer => pointer && replace[pointer.objectId])
-        .filter(pointer => pointer || pointer === null);
-    } else if (pointerOrPointers && pointerOrPointers.__type === 'Pointer') {
-      node[attrName] = replace[pointerOrPointers.objectId];
+    const value = node[attrName];
+    if (value instanceof Array) {
+      // the value can be a mixed array; be careful to only replace pointers!
+      node[attrName] = value
+        .map(obj => obj && obj.__type === 'Pointer' ? replace[obj.objectId] : obj)
+        .filter(pointer => typeof pointer !== 'undefined');
+    } else if (value && value.__type === 'Pointer') {
+      node[attrName] = replace[value.objectId];
     }
   });
 }
