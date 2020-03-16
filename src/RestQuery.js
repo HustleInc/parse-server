@@ -553,25 +553,60 @@ RestQuery.prototype.runCount = function() {
 };
 
 // Augments this.response with data at the paths provided in this.include.
+//
+// Preconditions:
+// - `this.include` is an array of arrays of strings; (in flow parlance, Array<Array<string>>)
+//
+// - `this.include` is de-duplicated. This ensures that we don't try to fetch
+//   the same objects twice.
+//
+// - For each value in `this.include` with length > 1, there is also
+//   an earlier value for the prefix of that value.
+//
+//   Example: ['a', 'b', 'c'] in the array implies that ['a', 'b'] is also in
+//   the array, at an earlier position).
+//
+//   This prevents trying to follow pointers on unfetched objects.
 RestQuery.prototype.handleInclude = function() {
-  if (this.include.length == 0) {
+  if (this.include.length === 0){
     return;
   }
 
-  var pathResponse = includePath(this.config, this.auth,
-    this.response, this.include[0], this.restOptions);
-  if (pathResponse.then) {
-    return pathResponse.then((newResponse) => {
-      this.response = newResponse;
-      this.include = this.include.slice(1);
-      return this.handleInclude();
-    });
-  } else if (this.include.length > 0) {
-    this.include = this.include.slice(1);
-    return this.handleInclude();
-  }
+  // The list of includes form a sort of a tree - Each path should wait to
+  // start trying to load until its parent path has finished loading (so that
+  // the pointers it is trying to read and fetch are in the object tree).
+  //
+  // So, for instance, if we have an include of ['a', 'b', 'c'], that must
+  // wait on the include of ['a', 'b'] to finish, which must wait on the include
+  // of ['a'] to finish.
+  //
+  // This `promises` object is a map of dotted paths to promises that resolve
+  // when that path has finished loading into the tree. One special case is the
+  // empty path (represented by the empty string). This represents the root of
+  // the tree, which is `this.response` and is already fetched. We set a
+  // pre-resolved promise at that level, meaning that include paths with only
+  // one component (like `['a']`) will chain onto that resolved promise and
+  // are immediately unblocked.
+  const promises = { '': Promise.resolve() };
+  this.include.forEach((path) => {
+    const dottedPath = path.join('.');
 
-  return pathResponse;
+    // Get the promise for the parent path
+    const parentDottedPath = path.slice(0, -1).join('.');
+    const parentPromise = promises[parentDottedPath];
+
+    // Once the parent promise has resolved, do this path's load step
+    const loadPromise = parentPromise.then(() =>
+      includePath(this.config, this.auth, this.response, path, this.restOptions)
+    );
+
+    // Put our promise into the promises map, so child paths can find and chain
+    // off of it
+    promises[dottedPath] = loadPromise;
+  });
+
+  // Wait for all includes to be fetched and merged in to the response tree
+  return Promise.all(Object.values(promises));
 };
 
 //Returns a promise of a processed set of results
@@ -607,7 +642,7 @@ RestQuery.prototype.runAfterFindTrigger = function() {
 
 // Adds included values to the response.
 // Path is a list of field names.
-// Returns a promise for an augmented response.
+// Modifies the response in place by replacing pointers in the response with fetched objects
 function includePath(config, auth, response, path, restOptions = {}) {
   var pointers = findPointers(response.results, path);
   if (pointers.length == 0) {
@@ -682,85 +717,71 @@ function includePath(config, auth, response, path, restOptions = {}) {
       return replace;
     }, {})
 
-    var resp = {
-      results: replacePointers(response.results, path, replace)
-    };
-    if (response.count) {
-      resp.count = response.count;
-    }
-    return resp;
+    replacePointers(response.results, path, replace);
+    return response;
   });
+}
+
+
+// Given a tree of REST-format objects, where each node could actually be an
+// array of REST-format objects, and a path that is an array of attribute names
+// to follow, pass each node at that path into the given callback.
+//
+// @param objectOrArray The REST-format object tree
+// @param path An array of attribute names
+// @param callback A function that takes a single REST-format object
+function traverse(objectOrArray, path, callback) {
+  if (objectOrArray instanceof Array) {
+    return objectOrArray.forEach((node) => traverse(node, path, callback));
+  }
+  if (!objectOrArray || typeof objectOrArray !== 'object') {
+    return;
+  }
+
+  if (path.length === 0) {
+    callback(objectOrArray);
+    return;
+  }
+
+  const attr = path[0];
+  const node = objectOrArray[attr];
+  if (!node) { return; }
+  const remainingPath = path.slice(1);
+  traverse(node, remainingPath, callback);
 }
 
 // Object may be a list of REST-format object to find pointers in, or
 // it may be a single object.
-// If the path yields things that aren't pointers, this throws an error.
 // Path is a list of fields to search into.
 // Returns a list of pointers in REST format.
 function findPointers(object, path) {
-  if (object instanceof Array) {
-    var answer = [];
-    for (var x of object) {
-      answer = answer.concat(findPointers(x, path));
-    }
-    return answer;
-  }
-
-  if (typeof object !== 'object' || !object) {
-    return [];
-  }
-
-  if (path.length == 0) {
-    if (object === null || object.__type == 'Pointer') {
-      return [object];
-    }
-    return [];
-  }
-
-  var subobject = object[path[0]];
-  if (!subobject) {
-    return [];
-  }
-  return findPointers(subobject, path.slice(1));
+  const pointers = [];
+  traverse(object, path, (node) => {
+    if (node.__type === 'Pointer') { pointers.push(node); }
+  });
+  return pointers;
 }
 
 // Object may be a list of REST-format objects to replace pointers
 // in, or it may be a single object.
 // Path is a list of fields to search into.
 // replace is a map from object id -> object.
-// Returns something analogous to object, but with the appropriate
-// pointers inflated.
+//
+// Performs replacements in-place
 function replacePointers(object, path, replace) {
-  if (object instanceof Array) {
-    return object.map((obj) => replacePointers(obj, path, replace))
-      .filter((obj) => typeof obj !== 'undefined');
-  }
-
-  if (typeof object !== 'object' || !object) {
-    return object;
-  }
-
-  if (path.length === 0) {
-    if (object && object.__type === 'Pointer') {
-      return replace[object.objectId];
+  const searchPath = path.slice(0, -1);
+  const attrName = path[path.length - 1];
+  traverse(object, searchPath, (node) => {
+    const value = node[attrName];
+    if (value instanceof Array) {
+      // the value can be a mixed array; be careful to only replace pointers!
+      node[attrName] = value
+        .map(obj => obj && obj.__type === 'Pointer' ? replace[obj.objectId] : obj)
+        .filter(pointer => typeof pointer !== 'undefined');
+    } else if (value && value.__type === 'Pointer') {
+      node[attrName] = replace[value.objectId];
     }
-    return object;
-  }
-
-  var subobject = object[path[0]];
-  if (!subobject) {
-    return object;
-  }
-  var newsub = replacePointers(subobject, path.slice(1), replace);
-  var answer = {};
-  for (var key in object) {
-    if (key == path[0]) {
-      answer[key] = newsub;
-    } else {
-      answer[key] = object[key];
-    }
-  }
-  return answer;
+  });
 }
 
 // Finds a subobject that has the given key, if there is one.
