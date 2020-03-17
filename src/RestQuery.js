@@ -791,9 +791,7 @@ RestQuery.prototype.handleInclude = function() {
     const parentPromise = promises[parentDottedPath];
 
     // Once the parent promise has resolved, do this path's load step
-    const loadPromise = parentPromise.then(() =>
-      this.response = includePath(this.config, this.auth, this.response, path, this.restOptions)
-    );
+    const loadPromise = parentPromise.then(() => this.includePath(path));
 
     // Put our promise into the promises map, so child paths can find and chain
     // off of it
@@ -852,11 +850,11 @@ RestQuery.prototype.runAfterFindTrigger = function() {
 
 // Adds included values to the response.
 // Path is a list of field names.
-// Returns a promise for an augmented response.
-function includePath(config, auth, response, path, restOptions = {}) {
-  var pointers = findPointers(response.results, path);
+// Returns a promise that resolves when the path has been loaded into `this.response`
+RestQuery.prototype.includePath = function(path) {
+  var pointers = findPointers(this.response.results, path);
   if (pointers.length == 0) {
-    return response;
+    return;
   }
   const pointersHash = {};
   for (var pointer of pointers) {
@@ -871,8 +869,8 @@ function includePath(config, auth, response, path, restOptions = {}) {
     }
   }
   const includeRestOptions = {};
-  if (restOptions.keys) {
-    const keys = new Set(restOptions.keys.split(','));
+  if (this.restOptions.keys) {
+    const keys = new Set(this.restOptions.keys.split(','));
     const keySet = Array.from(keys).reduce((set, key) => {
       const keyPath = key.split('.');
       let i = 0;
@@ -891,12 +889,11 @@ function includePath(config, auth, response, path, restOptions = {}) {
     }
   }
 
-  if (restOptions.includeReadPreference) {
-    includeRestOptions.readPreference = restOptions.includeReadPreference;
-    includeRestOptions.includeReadPreference =
-      restOptions.includeReadPreference;
-  } else if (restOptions.readPreference) {
-    includeRestOptions.readPreference = restOptions.readPreference;
+  if (this.restOptions.includeReadPreference) {
+    includeRestOptions.readPreference = this.restOptions.includeReadPreference;
+    includeRestOptions.includeReadPreference = this.restOptions.includeReadPreference;
+  } else if (this.restOptions.readPreference) {
+    includeRestOptions.readPreference = this.restOptions.readPreference;
   }
 
   const queryPromises = Object.keys(pointersHash).map(className => {
@@ -908,8 +905,8 @@ function includePath(config, auth, response, path, restOptions = {}) {
       where = { objectId: { $in: objectIds } };
     }
     var query = new RestQuery(
-      config,
-      auth,
+      this.config,
+      this.auth,
       className,
       where,
       includeRestOptions
@@ -927,7 +924,7 @@ function includePath(config, auth, response, path, restOptions = {}) {
         obj.__type = 'Object';
         obj.className = includeResponse.className;
 
-        if (obj.className == '_User' && !auth.isMaster) {
+        if (obj.className == '_User' && !this.auth.isMaster) {
           delete obj.sessionToken;
           delete obj.authData;
         }
@@ -936,15 +933,21 @@ function includePath(config, auth, response, path, restOptions = {}) {
       return replace;
     }, {});
 
-    var resp = {
-      results: replacePointers(response.results, path, replace),
-    };
-    if (response.count) {
-      resp.count = response.count;
+    // TRICKY: this block _must_ happen synchronously; we are reading and
+    // replacing `this.response`, and if we yield to the event loop in
+    // between reading the value and writing it back then we risk overwriting
+    // the work of another invocation of this method.
+    {
+      var resp = {
+        results: replacePointers(this.response.results, path, replace),
+      };
+      if (this.response.count) {
+        resp.count = this.response.count;
+      }
+      this.response = resp;
     }
-    return resp;
   });
-}
+};
 
 // Object may be a list of REST-format object to find pointers in, or
 // it may be a single object.
@@ -984,6 +987,9 @@ function findPointers(object, path) {
 // replace is a map from object id -> object.
 // Returns something analogous to object, but with the appropriate
 // pointers inflated.
+//
+// TRICKY: This method _must_ not yield to the event loop (see comment in
+// `includePath` above).
 function replacePointers(object, path, replace) {
   if (object instanceof Array) {
     return object
