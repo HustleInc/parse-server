@@ -12,6 +12,7 @@ export default class SchemaCache {
     ttl = defaults.schemaCacheTTL,
     singleCache = false
   ) {
+    console.log({cacheController, ttl, singleCache});
     this.ttl = ttl;
     if (typeof ttl == 'string') {
       this.ttl = parseInt(ttl);

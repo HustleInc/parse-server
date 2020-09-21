@@ -8,6 +8,8 @@ import DatabaseController from './Controllers/DatabaseController';
 import net from 'net';
 import { IdempotencyOptions } from './Options/Definitions';
 
+console.log('WOWOWOWOWOWOW');
+
 function removeTrailingSlash(str) {
   if (!str) {
     return str;
@@ -28,6 +30,7 @@ export class Config {
     config.applicationId = applicationId;
     Object.keys(cacheInfo).forEach(key => {
       if (key == 'databaseController') {
+        console.log('USING SCHEMA CACHE FROM CONFIG');
         const schemaCache = new SchemaCache(
           cacheInfo.cacheController,
           cacheInfo.schemaCacheTTL,
